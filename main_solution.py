@@ -6,26 +6,69 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import matthews_corrcoef
 from tifffile import imwrite
-import argparse
 
 
-# === Define ANN model in TensorFlow ===
-def build_pixel_ann():
-    model = models.Sequential(
-        [
-            layers.Input(shape=(5,)),
-            layers.Dense(16, activation="relu"),
-            layers.Dense(32, activation="relu"),
-            layers.Dense(16, activation="relu"),
-            layers.Dense(8, activation="relu"),
-            layers.Dense(1, activation="sigmoid"),
-        ]
-    )
+
+def conv_block(x, filters, kernel_size=3, padding="same", activation="relu"):
+    x = layers.Conv2D(filters, kernel_size, padding=padding)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(activation)(x)
+    x = layers.Conv2D(filters, kernel_size, padding=padding)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(activation)(x)
+    return x
+
+def unet_plus_plus(input_shape=(128, 128, 5), num_classes=1):
+    inputs = layers.Input(shape=input_shape)
+
+    # Encoder
+    x00 = conv_block(inputs, 32)
+    x10 = conv_block(layers.MaxPooling2D()(x00), 64)
+    x20 = conv_block(layers.MaxPooling2D()(x10), 128)
+    x30 = conv_block(layers.MaxPooling2D()(x20), 256)
+    x40 = conv_block(layers.MaxPooling2D()(x30), 512)
+
+    # Decoder with nested skip connections
+    x01 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x10), x00
+    ]), 32)
+
+    x11 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x20), x10
+    ]), 64)
+
+    x21 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x30), x20
+    ]), 128)
+
+    x31 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x40), x30
+    ]), 256)
+
+    x02 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x11), x01, x00
+    ]), 32)
+
+    x12 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x21), x11, x10
+    ]), 64)
+
+    x22 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x31), x21, x20
+    ]), 128)
+
+    x03 = conv_block(layers.Concatenate()([
+        layers.UpSampling2D()(x12), x02, x01, x00
+    ]), 32)
+
+    # Output layer (sigmoid for binary segmentation)
+    output = layers.Conv2D(num_classes, kernel_size=1, activation="sigmoid")(x03)
+
+    model = models.Model(inputs=inputs, outputs=output)
     return model
+
 
 
 def get_tile_id(filename):
@@ -39,10 +82,21 @@ def get_tile_id(filename):
     return match.group(1) if match else None
 
 
+
 def maskgeration(imagepath, model_path):
     # Load model
-    model = build_pixel_ann()
-    model.load_weights("model_tf.h5")  # TensorFlow checkpoint
+    model = unet_plus_plus(input_shape=(128, 128, 5), num_classes=1)
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+    # model.fit(
+    #     train_images, train_masks,
+    #     validation_data=(val_images, val_masks),
+    #     batch_size=16,
+    #     epochs=50
+    # )
+
+    # Save the trained weights
+    model.save_weights('model_unetpp.h5')
 
     def normalize_band(band_data):
         band_data = band_data.astype(np.float32)
@@ -120,3 +174,10 @@ def maskgeration(imagepath, model_path):
         masks[tile_id] = full_mask
 
     return masks
+
+def metrics(true, preds):
+    from sklearn.metrics import matthews_corrcoef
+
+    mcc_score = matthews_corrcoef(true, preds)
+    print("Matthews Correlation Coefficient:", mcc_score)
+
