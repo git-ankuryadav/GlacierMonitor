@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+venv/
+.env/
+.DS_Store
+.vscode/
+predicted_labels/
+model_tf.weights.h5

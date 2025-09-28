@@ -1,2 +1,5 @@
 ANN Model on 20 train and 5 test images-
 MCC: 0.356906337847241
+
+Unet model on 20 train and 5 test images
+MCC on test  0.3862279814658087

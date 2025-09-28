@@ -1,3 +1,5 @@
+print("Script started")
+
 import os
 import re
 import numpy as np
@@ -5,6 +7,13 @@ from PIL import Image
 from sklearn.metrics import matthews_corrcoef
 import tensorflow as tf
 from tensorflow.keras import layers, models
+
+import tifffile
+
+def save_prediction_as_tif(pred_array, filename):
+    # pred_array: 2D numpy array with binary values (0/1)
+    pred_uint8 = (pred_array * 255).astype(np.uint8)
+    tifffile.imwrite(filename, pred_uint8)
 
 def extract_tile_id(filename):
     match = re.search(r'(\d{2}_\d{2})', filename)
@@ -174,6 +183,14 @@ def load_and_evaluate_model(test_imagepath, test_label_folder, weights_path):
 
     y_pred_prob = model.predict(X_test).squeeze()  # shape (num_samples, H, W)
     y_pred = (y_pred_prob > 0.5).astype(np.uint8)
+
+    output_dir = 'predicted_labels'
+    os.makedirs(output_dir, exist_ok=True)
+
+    for i in range(y_pred.shape[0]):
+     pred_mask = y_pred[i]  # 2D array, values 0 or 1
+     filename = os.path.join(output_dir, f'predicted_mask_{i}.tif')
+     save_prediction_as_tif(pred_mask, filename)
 
     # Flatten for MCC calculation
     mcc = matthews_corrcoef(y_test.flatten(), y_pred.flatten())
