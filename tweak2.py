@@ -220,6 +220,6 @@ if __name__ == '__main__':
     }
     test_label_folder = os.path.join(test_dir, 'Actual')
 
-    # train_and_save_model(train_imagepath, train_label_folder, weights_file)
+    train_and_save_model(train_imagepath, train_label_folder, weights_file)
     
     load_and_evaluate_model(test_imagepath, test_label_folder, weights_file)
