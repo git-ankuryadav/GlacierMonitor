@@ -7,3 +7,4 @@ venv/
 predicted_labels/
 model_tf.weights.h5
 npyy/
+model.h5

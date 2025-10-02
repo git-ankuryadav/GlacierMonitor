@@ -7,6 +7,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.models import load_model
 from sklearn.metrics import matthews_corrcoef
 import tifffile
 import re
@@ -219,213 +220,77 @@ def combined_loss(y_true, y_pred):
     bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
     dice = dice_loss(y_true, y_pred)
     return bce + dice
+def maskgeration(imagepath, model_path):
+    """Generate glacier masks using trained DeepLabV3+ model.
+    
+    Args:
+        imagepath (dict): Dictionary mapping band names to folder paths.
+        model_path (str): Path to the trained model (.h5).
 
-def train_and_save_model(train_imagepath, train_label_folder, weights_path):
-    """Train model and save weights"""
-    print("Loading training data...")
-    X_train, y_train = prepare_dataset(train_imagepath, train_label_folder)
-    
-    # Create model
-    print("Creating model...")
-    model = DeeplabV3Plus(image_size=512, num_classes=1)
-    
-    # Compile model with combined loss
-    model.compile(
-        optimizer=Adam(learning_rate=1e-4),
-        loss=combined_loss,
-        metrics=['accuracy', dice_coefficient]
-    )
-    
-    # Print model summary
-    print("Model summary:")
-    model.summary()
-    
-    # Calculate model size
-    param_count = model.count_params()
-    estimated_size_mb = (param_count * 4) / (1024 * 1024)  # 4 bytes per float32 parameter
-    print(f"Model parameters: {param_count:,}")
-    print(f"Estimated model size: {estimated_size_mb:.2f} MB")
-    
-    if estimated_size_mb > 200:
-        print("WARNING: Model size may exceed 200MB limit!")
-    
-    # Setup callbacks
-    callbacks = [
-        ModelCheckpoint(
-            filepath='model.h5',          # full-model file
-            monitor='val_dice_coefficient',
-            mode='max',
-            save_best_only=True,
-            save_weights_only=False,      # save entire model
-            verbose=1
-        )
-,
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-7,
-            verbose=1
-        ),
-        EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            verbose=1,
-            restore_best_weights=True
-        )
-    ]
-    
-    # Train model
-    print("Starting training...")
-    history = model.fit(
-        X_train, y_train,
-        batch_size=2,  # Small batch size due to memory constraints
-        epochs=50,
-        validation_split=0.2,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    print("Training completed!")
-    
-    # Save final model weights
-    model.save(weights_path)
-    print(f"Model saved as {weights_path}")
-    
-    # Check final file size
-    if os.path.exists(weights_path):
-        file_size_mb = os.path.getsize(weights_path) / (1024 * 1024)
-        print(f"Actual model file size: {file_size_mb:.2f} MB")
-        
-        if file_size_mb > 200:
-            print("WARNING: Model file size exceeds 200MB limit!")
-        else:
-            print("✓ Model file size is within the 200MB limit")
-
-def load_and_evaluate_model(test_imagepath, test_label_folder, weights_path):
-    """Load model and evaluate on test set"""
-    print("Loading test data...")
-    X_test, y_test = prepare_dataset(test_imagepath, test_label_folder)
-    
-    print("Creating model and loading weights...")
-    model = DeeplabV3Plus(image_size=512, num_classes=1)
-    model.compile(
-        optimizer=Adam(learning_rate=1e-4),
-        loss=combined_loss,
-        metrics=['accuracy', dice_coefficient]
-    )
-    model.load_weights(weights_path)
-    
-    # Predict on test set
-    y_pred_prob = model.predict(X_test)
-    y_pred_binary = (y_pred_prob > 0.5).astype(np.int32)
-    
-    # Calculate MCC for each image and average
-    mcc_scores = []
-    for i in range(len(y_test)):
-        y_true_flat = y_test[i].flatten()
-        y_pred_flat = y_pred_binary[i].flatten()
-        
-        # Skip if all predictions are the same class
-        if len(np.unique(y_pred_flat)) == 1:
-            continue
-            
-        mcc = matthews_corrcoef(y_true_flat, y_pred_flat)
-        mcc_scores.append(mcc)
-    
-    if mcc_scores:
-        avg_mcc = np.mean(mcc_scores)
-        print(f"Average Matthews Correlation Coefficient: {avg_mcc:.4f}")
-    else:
-        print("Could not calculate MCC (all predictions same class)")
-    
-    return avg_mcc if mcc_scores else 0.0
-
-def maskgeration(imagepath, out_dir):
-    """Generate glacier masks using trained DeepLabV3+ model"""
-    import os, numpy as np, tifffile
+    Returns:
+        dict[str, np.ndarray]: Mapping from tile ID to binary mask array (H×W uint8).
+    """
+    import os
+    import numpy as np
     from PIL import Image
+    import tensorflow as tf
 
-    # Load model and weights
-    model = DeeplabV3Plus(image_size=512, num_classes=1)
-    model.load_weights("model_tf.weights.h5")
+    # 1. Load model
+    model = tf.keras.models.load_model(model_path, compile=False)
 
+    # 2. Band normalization helper
     def normalize_band(arr):
         arr = arr.astype(np.float32)
         m, s = arr.mean(), arr.std()
         return (arr - m) / s if s > 0 else arr
 
-    # Map band → tile_id → filename
-    band_dirs = sorted(d for d in os.listdir(imagepath) if os.path.isdir(os.path.join(imagepath, d)))
-    band_map = {band: {} for band in band_dirs}
-    for band in band_dirs:
-        for f in os.listdir(os.path.join(imagepath, band)):
-            if f.lower().endswith(".tif"):
+    # 3. Build band → tile_id → filename map (imagepath is now a dict)
+    band_tile_map = {band: {} for band in imagepath}
+    for band, folder in imagepath.items():
+        if not os.path.exists(folder):
+            continue
+        files = os.listdir(folder)
+        for f in files:
+            if f.endswith(".tif"):
                 tid = extract_tile_id(f)
                 if tid:
-                    band_map[band][tid] = f
+                    band_tile_map[band][tid] = f
 
-    ref = band_dirs[0]
-    tiles = sorted(band_map[ref].keys())
-    os.makedirs(out_dir, exist_ok=True)
+    # 4. Reference band to enumerate tile IDs
+    ref_band = sorted(imagepath.keys())[0]
+    tile_ids = sorted(band_tile_map[ref_band].keys())
 
-    for tid in tiles:
-        # Load and stack all 5 bands into 512×512×5 array
-        bands = []
-        for band in band_dirs:
-            fn = band_map[band].get(tid)
-            if not fn:
+    masks = {}
+    for tid in tile_ids:
+        # 5. Load and normalize all 5 bands for this tile
+        arrays = []
+        H = W = None
+        for band_name in sorted(imagepath.keys()):
+            if tid not in band_tile_map[band_name]:
                 break
-            p = os.path.join(imagepath, band, fn)
-            if not os.path.isfile(p):
+            file_path = os.path.join(imagepath[band_name], band_tile_map[band_name][tid])
+            if not os.path.exists(file_path):
                 break
-            a = np.array(Image.open(p))
-            if a.ndim == 3:
-                a = a[..., 0]
-            bands.append(normalize_band(a))
+            arr = np.array(Image.open(file_path))
+            if arr.ndim == 3:
+                arr = arr[..., 0]
+            H, W = arr.shape
+            arrays.append(normalize_band(arr))
         else:
-            X = np.stack(bands, axis=-1)
-            # If not 512×512, resize
-            if X.shape[:2] != (512, 512):
+            # 6. Stack into H×W×5
+            X = np.stack(arrays, axis=-1)
+            # 7. Resize to 512×512 if needed
+            if (H, W) != (512, 512):
                 R = []
                 for c in range(5):
                     im = Image.fromarray(X[..., c])
                     im = im.resize((512, 512), Image.BILINEAR)
                     R.append(np.array(im))
                 X = np.stack(R, axis=-1)
-            # Predict full mask
+            # 8. Predict full tile mask
             pred = model.predict(X[np.newaxis], verbose=0)[0, ..., 0]
             mask = (pred > 0.5).astype(np.uint8) * 255
-            out_fn = band_map[ref][tid]
-            tifffile.imwrite(os.path.join(out_dir, out_fn), mask, dtype=np.uint8)
+            # 9. Store in dict by tile ID
+            masks[tid] = mask
 
-
-if __name__ == '__main__':
-    train_dir = 'train'
-    test_dir = 'test'
-    weights_file = 'model.h5'
-    imagepath = 'test'
-    outpath = 'finalOutput'
-
-    train_imagepath = {
-        'band1': os.path.join(train_dir, 'Band1'),
-        'band2': os.path.join(train_dir, 'Band2'),
-        'band3': os.path.join(train_dir, 'Band3'),
-        'band4': os.path.join(train_dir, 'Band4'),
-        'band5': os.path.join(train_dir, 'Band5'),
-    }
-    train_label_folder = os.path.join(train_dir, 'Label')
-
-    test_imagepath = {
-        'band1': os.path.join(test_dir, 'Band1'),
-        'band2': os.path.join(test_dir, 'Band2'),
-        'band3': os.path.join(test_dir, 'Band3'),
-        'band4': os.path.join(test_dir, 'Band4'),
-        'band5': os.path.join(test_dir, 'Band5'),
-    }
-    test_label_folder = os.path.join(test_dir, 'Actual')
-
-    train_and_save_model(train_imagepath, train_label_folder, weights_file)
-    
-    # load_and_evaluate_model(test_imagepath, test_label_folder, weights_file)
-    # maskgeration(imagepath='test', out_dir='finalOutput' )
+    return masks

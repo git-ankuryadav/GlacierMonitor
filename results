@@ -3,3 +3,9 @@ MCC: 0.356906337847241
 
 Unet model on 20 train and 5 test images
 MCC on test  0.3862279814658087
+
+Similar on DeepLab V3++:
+0.4201
+
+Final MCC on submission:
+0.564489
